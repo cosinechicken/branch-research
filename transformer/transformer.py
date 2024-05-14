@@ -95,7 +95,7 @@ class PositionalEncoding(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size=128, d_model=96, d_ffn=3072, h=12, n=2, max_len=2048):
+    def __init__(self, vocab_size=128, d_model=768, d_ffn=3072, h=12, n=2, max_len=2048):
         super().__init__()
         self.d_model = d_model
         self.d_ffn = d_ffn
@@ -107,8 +107,6 @@ class Transformer(nn.Module):
         self.W_O = nn.Linear(d_model, vocab_size)
 
         for p in self.parameters():
-            print(p.shape)
-
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
@@ -116,19 +114,18 @@ class Transformer(nn.Module):
         # x: (batch, length, d_model)
         x = self.pe(self.W_E(x))
         mask = torch.triu(torch.ones((x.shape[1], x.shape[1])), diagonal=1).type(torch.uint8) == 0
+        mask = mask.to(x.device)
         for layer in self.layers:
             x = layer(x, mask)
-            print(x)
 
-        return self.W_O(x[:, -1, :]).softmax(dim=-1)
+        return self.W_O(x)
     
-transformer = Transformer()
-input = einops.rearrange(torch.arange(32), "(b l) -> b l", b = 4)
-print(input)
+# transformer = Transformer()
+# input = einops.rearrange(torch.arange(32), "(b l) -> b l", b = 4)
 
-for _ in range(8):
-    output = torch.argmax(transformer(input), dim=-1)
-    print(output)
-    input = torch.cat([input, output.unsqueeze(-1)], dim=-1)
+# for _ in range(8):
+#     output = torch.argmax(transformer(input), dim=-1)
+#     print(output)
+#     input = torch.cat([input, output.unsqueeze(-1)], dim=-1)
 
-print(input)
+# print(input)
