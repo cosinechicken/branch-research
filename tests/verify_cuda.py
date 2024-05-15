@@ -1,5 +1,9 @@
 import torch
 
+"""
+Run this to verify if cuda installation is working
+"""
+
 # Check if CUDA is available
 cuda_available = torch.cuda.is_available()
 print(f"CUDA available: {cuda_available}")
