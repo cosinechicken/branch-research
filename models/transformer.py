@@ -2,11 +2,14 @@ import einops
 import math
 import torch
 import torch.nn as nn
+from torch import Tensor
+from typing import Optional
+from jaxtyping import Float, Int
 
 # Always include batch dimension
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, h, dropout=0.1):
+    def __init__(self, d_model: Int, h: Int, dropout: float = 0.1) -> None:
         # d_model: dimension of each x
         super().__init__()
         assert d_model % h == 0
@@ -18,8 +21,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.cache = None
     
-    def forward(self, x, mask=None):
-        # x: (batch, length, d_model)
+    def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         # mask: (length, length)
         QKVOx = self.linears(x) # (b, l, 3*d)
 
@@ -48,7 +50,7 @@ class MultiHeadAttention(nn.Module):
         return self.O(Vx_new)
     
 class MLP(nn.Module):
-    def __init__(self, d_model, d_ffn):
+    def __init__(self, d_model: Int, d_ffn: Int) -> None:
         super().__init__()
         assert d_ffn % d_model == 0
         self.d_model = d_model
@@ -57,42 +59,42 @@ class MLP(nn.Module):
         self.ffn_2 = nn.Linear(d_ffn, d_model)
         self.relu = nn.ReLU()
 
-    def forward(self, x, mask=None):
+    def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         return self.ffn_2(self.relu(self.ffn_1(x)))
     
 class LayerNorm(nn.Module):
-    def __init__(self, shape, eps=1e-6):
+    def __init__(self, shape: Int, eps: Float = 1e-6) -> None:
         # shape = d_model
         super().__init__()
         self.a = nn.Parameter(torch.ones(shape))
         self.b = nn.Parameter(torch.zeros(shape))
         self.eps = eps
 
-    def forward(self, x):
-        # x: (batch, length, d_model)
+    def forward(self, x: Float[Tensor, "batch length d_model"]) -> Float[Tensor, "batch length d_model"]:
         mean = torch.mean(x, dim=-1, keepdim=True)
         std = torch.std(x, dim=-1, keepdim=True)
         return ((x - mean) / (std + self.eps)) * self.a + self.b
     
 class SubLayer(nn.Module):
-    def __init__(self, shape, layer_fn, use_layer_norm=True):
+    def __init__(self, shape: Int, layer_fn: nn.Module, use_layer_norm: bool = True) -> None:
         super().__init__()
-        self.layer_fn = layer_fn # Either Attention or MLP
+        self.layer_fn = layer_fn  # Either Attention or MLP
         self.use_layer_norm = use_layer_norm
         if use_layer_norm:
             self.layer_norm = LayerNorm(shape)
         else:
             self.layer_norm = None
     
-    def forward(self, x, mask=None):
-        # x: (batch, length, dimension)
+    def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         if self.use_layer_norm:
             return self.layer_norm(x + self.layer_fn(x, mask))
         else:
             return x + self.layer_fn(x, mask)
 
+import torch.nn as nn
+
 class DecoderLayer(nn.Module):
-    def __init__(self, d_model, d_ffn, h, attn_only=False, layer_norm=True):
+    def __init__(self, d_model: Int, d_ffn: Int, h: Int, attn_only: bool = False, layer_norm: bool = True) -> None:
         super().__init__()
         self.attn_only = attn_only
         self.layer_norm = layer_norm
@@ -103,14 +105,14 @@ class DecoderLayer(nn.Module):
             self.mlp = SubLayer(d_model, MLP(d_model, d_ffn), self.layer_norm)
         
     
-    def forward(self, x, mask=None):
+    def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         if self.attn_only:
             return self.attn(x, mask)
         else:
             return self.mlp(self.attn(x, mask))
     
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=2048):
+    def __init__(self, d_model: Int, max_len: Int = 2048) -> None:
         super(PositionalEncoding, self).__init__()
         
         weight = torch.zeros(max_len, d_model)
@@ -123,13 +125,16 @@ class PositionalEncoding(nn.Module):
         weight = weight.unsqueeze(0)
         self.register_buffer("weight", weight)
 
-    def forward(self, x):
+    def forward(self, x: Float[Tensor, "batch length d_model"]) -> Float[Tensor, "batch length d_model"]:
         x = x + self.weight[:, : x.size(1)].requires_grad_(False)
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size=128, d_model=768, d_ffn=3072, h=12, n=2, max_len=2048, attn_only=False, layer_norm=True):
+    """
+    Defines a transformer model with causal attention. 
+    """
+    def __init__(self, vocab_size: Int = 128, d_model: Int = 768, d_ffn: Int = 3072, h: Int = 12, n: Int = 2, max_len: Int = 2048, attn_only: bool = False, layer_norm: bool = True) -> None:
         super().__init__()
         self.d_model = d_model
         self.d_ffn = d_ffn
@@ -151,8 +156,7 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, x):
-        # x: (batch, length, d_model)
+    def forward(self, x: Float[Tensor, "batch length d_model"]) -> Float[Tensor, "batch length d_model"]:
         x = self.pos(self.W_E(x))
         mask = torch.triu(torch.ones((x.shape[1], x.shape[1])), diagonal=1).type(torch.float32) == 0
         mask = mask.to(x.device)
@@ -162,13 +166,3 @@ class Transformer(nn.Module):
             x = layer(x, mask)
 
         return self.W_U(x)
-    
-# transformer = Transformer()
-# input = einops.rearrange(torch.arange(32), "(b l) -> b l", b = 4)
-
-# for _ in range(8):
-#     output = torch.argmax(transformer(input), dim=-1)
-#     print(output)
-#     input = torch.cat([input, output], dim=-1)
-
-# print(input)
