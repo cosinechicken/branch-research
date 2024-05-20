@@ -5,28 +5,40 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Optional
 from jaxtyping import Float, Int
+from dataclasses import dataclass
 
+@dataclass
+class TransformerConfig:
+    vocab_size: int = 128
+    d_model: int = 768
+    d_ffn: int = 3072
+    h: int = 12
+    d_head: int = d_model // h
+    n: int = 2
+    max_len: int = 2048
+    attn_only: bool = False
+    layer_norm: bool = True
+    ln_eps: float = 1e-6
+    dropout: float = 0.1
 # Always include batch dimension
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: Int, h: Int, dropout: float = 0.1) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         # d_model: dimension of each x
         super().__init__()
-        assert d_model % h == 0
-        self.h = h
-        self.d_model = d_model
-        self.d_head = d_model // h
-        self.linears = nn.Linear(d_model, 3*d_model) # output is (Q, K, V)
-        self.O = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
+        assert config.d_model % config.h == 0
+        self.config = config
+        self.linears = nn.Linear(config.d_model, 3*config.d_model) # output is (Q, K, V)
+        self.O = nn.Linear(config.d_model, config.d_model)
+        self.dropout = nn.Dropout(config.dropout)
         self.cache = None
     
     def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         # mask: (length, length)
         QKVOx = self.linears(x) # (b, l, 3*d)
 
-        Qx, Kx, Vx = torch.unbind(einops.rearrange(QKVOx, "b l (three h d) -> three b l h d", h=self.h, three=3))
-        attn = einops.einsum(Qx, Kx, "b lq h d, b lk h d -> b h lq lk") / self.d_head ** (1/2)
+        Qx, Kx, Vx = torch.unbind(einops.rearrange(QKVOx, "b l (three h d) -> three b l h d", h=self.config.h, three=3))
+        attn = einops.einsum(Qx, Kx, "b lq h d, b lk h d -> b h lq lk") / self.config.d_head ** (1/2)
         if not mask is None:
             attn.masked_fill_(mask == 0, float('-inf'))
         softmax = torch.softmax(attn, dim=-1) # (b l l)
@@ -34,12 +46,12 @@ class MultiHeadAttention(nn.Module):
 
         Vx_new = einops.rearrange(einops.einsum(post_dropout, Vx, "b h lq lk,  b lk h d -> b lq h d"), "b lq h d -> b lq (h d)")
 
-        W_Q_heads = einops.rearrange(self.linears.weight[:self.d_model], "(h d_head) d_model -> h d_head d_model", h=self.h)
-        W_K_heads = einops.rearrange(self.linears.weight[self.d_model:2*self.d_model], "(h d_head) d_model -> h d_head d_model", h=self.h)
+        W_Q_heads = einops.rearrange(self.linears.weight[:self.config.d_model], "(h d_head) d_model -> h d_head d_model", h=self.config.h)
+        W_K_heads = einops.rearrange(self.linears.weight[self.config.d_model:2*self.config.d_model], "(h d_head) d_model -> h d_head d_model", h=self.config.h)
         W_QK = einops.einsum(W_Q_heads, W_K_heads, "h d_head d_q, h d_head d_k -> h d_q d_k")
         
-        W_V_heads = einops.rearrange(self.linears.weight[2*self.d_model:], "(h d_head) d_model -> h d_head d_model", h=self.h)
-        W_O = einops.rearrange(self.O.weight, "d_model (h d_head) -> h d_model d_head", h=self.h)
+        W_V_heads = einops.rearrange(self.linears.weight[2*self.config.d_model:], "(h d_head) d_model -> h d_head d_model", h=self.config.h)
+        W_O = einops.rearrange(self.O.weight, "d_model (h d_head) -> h d_model d_head", h=self.config.h)
         W_OV = einops.einsum(W_O, W_V_heads, "h d_o d_head, h d_head d_v -> h d_o d_v")
 
         self.cache = {
@@ -50,75 +62,69 @@ class MultiHeadAttention(nn.Module):
         return self.O(Vx_new)
     
 class MLP(nn.Module):
-    def __init__(self, d_model: Int, d_ffn: Int) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
-        assert d_ffn % d_model == 0
-        self.d_model = d_model
-        self.d_ffn = d_ffn
-        self.ffn_1 = nn.Linear(d_model, d_ffn)
-        self.ffn_2 = nn.Linear(d_ffn, d_model)
+        assert config.d_ffn % config.d_model == 0
+        self.ffn_1 = nn.Linear(config.d_model, config.d_ffn)
+        self.ffn_2 = nn.Linear(config.d_ffn, config.d_model)
         self.relu = nn.ReLU()
 
     def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
         return self.ffn_2(self.relu(self.ffn_1(x)))
     
 class LayerNorm(nn.Module):
-    def __init__(self, shape: Int, eps: Float = 1e-6) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         # shape = d_model
         super().__init__()
-        self.a = nn.Parameter(torch.ones(shape))
-        self.b = nn.Parameter(torch.zeros(shape))
-        self.eps = eps
+        self.config = config
+        self.a = nn.Parameter(torch.ones(config.d_model))
+        self.b = nn.Parameter(torch.zeros(config.d_model))
 
     def forward(self, x: Float[Tensor, "batch length d_model"]) -> Float[Tensor, "batch length d_model"]:
         mean = torch.mean(x, dim=-1, keepdim=True)
         std = torch.std(x, dim=-1, keepdim=True)
-        return ((x - mean) / (std + self.eps)) * self.a + self.b
+        return ((x - mean) / (std + self.config.ln_eps)) * self.a + self.b
     
 class SubLayer(nn.Module):
-    def __init__(self, shape: Int, layer_fn: nn.Module, use_layer_norm: bool = True) -> None:
+    def __init__(self, config: TransformerConfig, layer_fn: nn.Module) -> None:
         super().__init__()
+        self.config = config
         self.layer_fn = layer_fn  # Either Attention or MLP
-        self.use_layer_norm = use_layer_norm
-        if use_layer_norm:
-            self.layer_norm = LayerNorm(shape)
+        if config.layer_norm:
+            self.layer_norm = LayerNorm(config)
         else:
             self.layer_norm = None
     
     def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
-        if self.use_layer_norm:
+        if self.config.layer_norm:
             return self.layer_norm(x + self.layer_fn(x, mask))
         else:
             return x + self.layer_fn(x, mask)
 
-import torch.nn as nn
-
 class DecoderLayer(nn.Module):
-    def __init__(self, d_model: Int, d_ffn: Int, h: Int, attn_only: bool = False, layer_norm: bool = True) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
-        self.attn_only = attn_only
-        self.layer_norm = layer_norm
-        self.attn = SubLayer(d_model, MultiHeadAttention(d_model, h), self.layer_norm)
-        if self.attn_only:
+        self.config = config
+        self.attn = SubLayer(config, MultiHeadAttention(config))
+        if config.attn_only:
             self.mlp = None
         else:
-            self.mlp = SubLayer(d_model, MLP(d_model, d_ffn), self.layer_norm)
+            self.mlp = SubLayer(config, MLP(config))
         
-    
     def forward(self, x: Float[Tensor, "batch length d_model"], mask: Optional[Tensor] = None) -> Float[Tensor, "batch length d_model"]:
-        if self.attn_only:
+        if self.config.attn_only:
             return self.attn(x, mask)
         else:
             return self.mlp(self.attn(x, mask))
     
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: Int, max_len: Int = 2048) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         super(PositionalEncoding, self).__init__()
-        
-        weight = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
+        self.config = config
+        weight = torch.zeros(config.max_len, config.d_model)
+        position = torch.arange(0, config.max_len).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
+            torch.arange(0, config.d_model, 2) * -(math.log(10000.0) / config.d_model)
         )
         weight[:, 0::2] = torch.sin(position * div_term)
         weight[:, 1::2] = torch.cos(position * div_term)
@@ -134,18 +140,13 @@ class Transformer(nn.Module):
     """
     Defines a transformer model with causal attention. 
     """
-    def __init__(self, vocab_size: Int = 128, d_model: Int = 768, d_ffn: Int = 3072, h: Int = 12, n: Int = 2, max_len: Int = 2048, attn_only: bool = False, layer_norm: bool = True) -> None:
+    def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
-        self.d_model = d_model
-        self.d_ffn = d_ffn
-        self.h = h
-        self.n = n
-        self.attn_only = attn_only
-        self.layer_norm = layer_norm
-        self.W_E = nn.Embedding(vocab_size, d_model)
-        self.layers = nn.ModuleList([DecoderLayer(d_model, d_ffn, h, attn_only, layer_norm) for _ in range(self.n)])
-        self.pos = PositionalEncoding(d_model, max_len)
-        self.W_U = nn.Linear(d_model, vocab_size)
+        self.config = config
+        self.W_E = nn.Embedding(config.vocab_size, config.d_model)
+        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.n)])
+        self.pos = PositionalEncoding(config)
+        self.W_U = nn.Linear(config.d_model, config.vocab_size)
         self.cache = {
             "mask": None,
             "W_E": self.W_E.weight.detach().cpu(),

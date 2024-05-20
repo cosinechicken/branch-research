@@ -1,10 +1,12 @@
 import torch
 import einops
-from ..models.transformer import Transformer
+
+from ..models import *
 
 if __name__ == "__main__":
 
-    model = Transformer()
+    config = TransformerConfig()
+    model = Transformer(config)
     input = einops.rearrange(torch.arange(8), "(b l) -> b l", b = 2)
 
     for _ in range(4):
